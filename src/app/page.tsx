@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useSyncExternalStore } from 'react';
 import { ChatGPTLayout } from '@/components/chatgpt';
 import {
   SnapchatHeader,
@@ -26,6 +26,58 @@ import {
 import { DEFAULT_CONFIG } from '@/lib/constants';
 import { Camera, Mic, Image as ImageIcon, Send } from 'lucide-react';
 
+// Hydration-safe external store for PartnerRole (URL ?user=partner2 or localStorage)
+let roleListeners: Array<() => void> = [];
+
+function subscribeRole(listener: () => void) {
+  roleListeners.push(listener);
+  return () => {
+    roleListeners = roleListeners.filter((l) => l !== listener);
+  };
+}
+
+function getClientRoleSnapshot(): PartnerRole {
+  if (typeof window === 'undefined') return 'partner1';
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const userParam = (params.get('user') || params.get('role') || '').toLowerCase();
+    if (['partner2', 'her', 'girlfriend', 'babe'].includes(userParam)) {
+      localStorage.setItem('stealth_chat_role', 'partner2');
+      return 'partner2';
+    }
+    if (['partner1', 'him', 'me', 'boyfriend'].includes(userParam)) {
+      localStorage.setItem('stealth_chat_role', 'partner1');
+      return 'partner1';
+    }
+    const savedRole = localStorage.getItem('stealth_chat_role') as PartnerRole;
+    if (savedRole === 'partner1' || savedRole === 'partner2') {
+      return savedRole;
+    }
+  } catch {
+    // localStorage not available
+  }
+  return 'partner1';
+}
+
+function getServerRoleSnapshot(): PartnerRole {
+  return 'partner1';
+}
+
+function updateClientRole(newRole: PartnerRole) {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem('stealth_chat_role', newRole);
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('user') || url.searchParams.has('role')) {
+      url.searchParams.set('user', newRole);
+      window.history.replaceState({}, '', url.toString());
+    }
+  } catch {
+    // ignore
+  }
+  roleListeners.forEach((l) => l());
+}
+
 export default function Home() {
   // Disguise Camouflage mode vs Private Snapchat mode
   // ALWAYS defaults to 'stealth' on initial load or browser refresh for 100% security!
@@ -33,29 +85,11 @@ export default function Home() {
 
   // App Configuration & Partner Profiles
   const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
-  const [currentRole, setCurrentRole] = useState<PartnerRole>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const params = new URLSearchParams(window.location.search);
-        const userParam = (params.get('user') || params.get('role') || '').toLowerCase();
-        if (['partner2', 'her', 'girlfriend', 'babe'].includes(userParam)) {
-          localStorage.setItem('stealth_chat_role', 'partner2');
-          return 'partner2';
-        }
-        if (['partner1', 'him', 'me', 'boyfriend'].includes(userParam)) {
-          localStorage.setItem('stealth_chat_role', 'partner1');
-          return 'partner1';
-        }
-        const savedRole = localStorage.getItem('stealth_chat_role') as PartnerRole;
-        if (savedRole === 'partner1' || savedRole === 'partner2') {
-          return savedRole;
-        }
-      } catch {
-        // localStorage not available
-      }
-    }
-    return 'partner1';
-  });
+  const currentRole = useSyncExternalStore(
+    subscribeRole,
+    getClientRoleSnapshot,
+    getServerRoleSnapshot
+  );
 
   // Messages & Presence
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -117,13 +151,49 @@ export default function Home() {
     }
   }, [config.roomId]);
 
-  // Fetch messages
+  // Fetch messages & reconcile with client localStorage backup
   const fetchMessages = useCallback(async () => {
+    const storageKey = `stealth_chat_msgs_${config.roomId}`;
     try {
       const res = await fetch(`/api/messages?roomId=${config.roomId}`);
       const data = await res.json();
       if (data.success && Array.isArray(data.messages)) {
-        setMessages(data.messages);
+        const serverMessages: ChatMessage[] = data.messages;
+        let localMessages: ChatMessage[] = [];
+        try {
+          const raw = localStorage.getItem(storageKey);
+          if (raw) localMessages = JSON.parse(raw);
+        } catch {
+          // ignore
+        }
+
+        const serverIds = new Set(serverMessages.map((m) => m.id));
+        const missingOnServer = localMessages.filter((m) => m && m.id && !serverIds.has(m.id));
+
+        if (missingOnServer.length > 0) {
+          const syncRes = await fetch('/api/messages', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ roomId: config.roomId, messages: missingOnServer }),
+          });
+          const syncData = await syncRes.json();
+          if (syncData.success && Array.isArray(syncData.messages)) {
+            setMessages(syncData.messages);
+            try {
+              localStorage.setItem(storageKey, JSON.stringify(syncData.messages.slice(-50)));
+            } catch {
+              // quota exceeded
+            }
+            return;
+          }
+        }
+
+        setMessages(serverMessages);
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(serverMessages.slice(-50)));
+        } catch {
+          // quota exceeded
+        }
       }
     } catch {
       // Ignore network errors in polling
@@ -169,7 +239,7 @@ export default function Home() {
         void fetchMessages();
         void pingPresence();
       }
-    }, 3000);
+    }, 1500);
 
     return () => {
       isSubscribed = false;
@@ -234,8 +304,19 @@ export default function Home() {
       reactions: {},
     };
 
-    // Optimistic UI update
-    setMessages((prev) => [...prev, fullMessage]);
+    // Optimistic UI update + localStorage backup
+    setMessages((prev) => {
+      const updated = [...prev, fullMessage];
+      try {
+        localStorage.setItem(
+          `stealth_chat_msgs_${config.roomId}`,
+          JSON.stringify(updated.slice(-50))
+        );
+      } catch {
+        // quota exceeded
+      }
+      return updated;
+    });
 
     try {
       await fetch('/api/messages', {
@@ -544,12 +625,7 @@ export default function Home() {
         onUpdateConfig={handleUpdateConfig}
         currentRole={currentRole}
         onSwitchRole={(role) => {
-          setCurrentRole(role);
-          try {
-            localStorage.setItem('stealth_chat_role', role);
-          } catch {
-            // ignore
-          }
+          updateClientRole(role);
         }}
       />
 

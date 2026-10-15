@@ -1,36 +1,60 @@
 import { ChatMessage, RoomPresence, AppConfig, PartnerRole } from '@/types';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 
 import { DEFAULT_CONFIG } from './constants';
 export { DEFAULT_CONFIG };
 
-// In-memory cache for fast serverless responses
-const memoryStore = {
-  messages: new Map<string, ChatMessage[]>(), // roomId -> messages
-  presence: new Map<string, RoomPresence>(), // roomId -> presence
+interface MemoryStoreType {
+  messages: Map<string, ChatMessage[]>;
+  presence: Map<string, RoomPresence>;
+  config: Map<string, AppConfig>;
+}
+
+const globalForChat = globalThis as unknown as {
+  __stealthChatMemoryStore?: MemoryStoreType;
+};
+
+// In-memory cache preserved across hot reloads and warm serverless invocations
+const memoryStore: MemoryStoreType = globalForChat.__stealthChatMemoryStore || {
+  messages: new Map<string, ChatMessage[]>(),
+  presence: new Map<string, RoomPresence>(),
   config: new Map<string, AppConfig>(),
 };
 
-// File persistence for local dev / persistent disk if available
-const DATA_DIR = path.join(process.cwd(), '.chat-data');
+globalForChat.__stealthChatMemoryStore = memoryStore;
 
-function ensureDataDir() {
+// File persistence: uses local .chat-data in dev, or /tmp/.chat-data on Vercel serverless
+function getWritableDataDir(): string {
+  const localDir = path.join(process.cwd(), '.chat-data');
+  if (!process.env.VERCEL) {
+    try {
+      if (!fs.existsSync(localDir)) {
+        fs.mkdirSync(localDir, { recursive: true });
+      }
+      return localDir;
+    } catch {
+      // Fallback to tmpdir
+    }
+  }
+  const tmpDir = path.join(os.tmpdir(), '.chat-data');
   try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+    if (!fs.existsSync(tmpDir)) {
+      fs.mkdirSync(tmpDir, { recursive: true });
     }
   } catch {
-    // Read-only serverless environment fallback to memoryStore
+    // Ignore
   }
+  return tmpDir;
 }
 
 function getRoomFilePath(roomId: string) {
-  return path.join(DATA_DIR, `room_${roomId}.json`);
+  const safeRoomId = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return path.join(getWritableDataDir(), `room_${safeRoomId}.json`);
 }
 
 function loadRoomData(roomId: string): { messages: ChatMessage[]; config: AppConfig } {
-  // Check memory first
   const cachedMessages = memoryStore.messages.get(roomId);
   const cachedConfig = memoryStore.config.get(roomId);
 
@@ -38,14 +62,15 @@ function loadRoomData(roomId: string): { messages: ChatMessage[]; config: AppCon
     return { messages: cachedMessages, config: cachedConfig };
   }
 
-  // Try file read
   try {
     const filePath = getRoomFilePath(roomId);
     if (fs.existsSync(filePath)) {
       const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-      memoryStore.messages.set(roomId, data.messages || []);
-      memoryStore.config.set(roomId, data.config || DEFAULT_CONFIG);
-      return { messages: data.messages || [], config: data.config || DEFAULT_CONFIG };
+      const msgs = Array.isArray(data.messages) ? data.messages : [];
+      const cfg = data.config || { ...DEFAULT_CONFIG, roomId };
+      memoryStore.messages.set(roomId, msgs);
+      memoryStore.config.set(roomId, cfg);
+      return { messages: msgs, config: cfg };
     }
   } catch {
     // Fall back to default
@@ -62,11 +87,10 @@ function saveRoomData(roomId: string, messages: ChatMessage[], config: AppConfig
   memoryStore.config.set(roomId, config);
 
   try {
-    ensureDataDir();
     const filePath = getRoomFilePath(roomId);
     fs.writeFileSync(filePath, JSON.stringify({ messages, config }, null, 2), 'utf-8');
   } catch {
-    // Vercel serverless / read-only filesystem: memoryStore holds state during instance life
+    // Read-only fallback: memoryStore holds state
   }
 }
 
@@ -77,15 +101,33 @@ export function getMessages(roomId: string): ChatMessage[] {
 
 export function addMessage(roomId: string, message: ChatMessage): ChatMessage {
   const { messages, config } = loadRoomData(roomId);
-  // Avoid duplicates
   const existingIndex = messages.findIndex((m) => m.id === message.id);
   if (existingIndex >= 0) {
     messages[existingIndex] = message;
   } else {
     messages.push(message);
+    messages.sort((a, b) => a.createdAt - b.createdAt);
   }
   saveRoomData(roomId, messages, config);
   return message;
+}
+
+export function syncMessages(roomId: string, clientMessages: ChatMessage[]): ChatMessage[] {
+  const { messages, config } = loadRoomData(roomId);
+  let changed = false;
+  for (const incoming of clientMessages) {
+    if (!incoming || !incoming.id) continue;
+    const existingIndex = messages.findIndex((m) => m.id === incoming.id);
+    if (existingIndex === -1) {
+      messages.push(incoming);
+      changed = true;
+    }
+  }
+  if (changed) {
+    messages.sort((a, b) => a.createdAt - b.createdAt);
+    saveRoomData(roomId, messages, config);
+  }
+  return messages;
 }
 
 export function toggleSaveMessage(roomId: string, messageId: string): ChatMessage | null {
@@ -127,7 +169,6 @@ export function getPresence(roomId: string): RoomPresence {
     partner2LastActive: 0,
   };
 
-  // Treat inactive for > 15s as offline
   return {
     ...presence,
     partner1Online: now - presence.partner1LastActive < 15000,

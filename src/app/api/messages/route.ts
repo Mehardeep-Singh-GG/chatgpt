@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getMessages, addMessage } from '@/lib/storage';
+import { getMessages, addMessage, syncMessages } from '@/lib/storage';
 import { ChatMessage } from '@/types';
 
 export async function GET(request: NextRequest) {
@@ -25,5 +25,24 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, message: saved });
   } catch {
     return NextResponse.json({ success: false, error: 'Failed to save message' }, { status: 500 });
+  }
+}
+
+export async function PUT(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const { roomId = 'our-secret-lounge', messages: clientMessages } = body as {
+      roomId?: string;
+      messages: ChatMessage[];
+    };
+
+    if (!Array.isArray(clientMessages)) {
+      return NextResponse.json({ success: false, error: 'Invalid messages array' }, { status: 400 });
+    }
+
+    const merged = syncMessages(roomId, clientMessages);
+    return NextResponse.json({ success: true, messages: merged });
+  } catch {
+    return NextResponse.json({ success: false, error: 'Failed to sync messages' }, { status: 500 });
   }
 }
