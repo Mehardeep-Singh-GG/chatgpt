@@ -168,11 +168,10 @@ export default function Home() {
     }
   }, []);
 
-  // Trigger PC Notification strictly for Partner 1
-  const notifyPartner1OnNewMessage = useCallback(
-    (msg: ChatMessage, partnerName: string) => {
-      // Strictly ONLY notify Partner 1 (you), NEVER Partner 2 (her)
-      if (currentRole !== 'partner1' || !notificationsEnabled) return;
+  // Trigger PC Notification whenever a message arrives from the other partner
+  const notifyOnNewMessage = useCallback(
+    (msg: ChatMessage, senderName: string) => {
+      if (!notificationsEnabled || msg.sender === currentRole) return;
 
       const body =
         msg.type === 'voice'
@@ -193,7 +192,7 @@ export default function Home() {
 
       // 3. Show discreet toast if sitting on the ChatGPT disguise screen
       if (mode === 'stealth') {
-        setUnreadToast({ title: partnerName, body });
+        setUnreadToast({ title: senderName, body });
         setTimeout(() => {
           setUnreadToast((prev) => (prev?.body === body ? null : prev));
         }, 6000);
@@ -203,7 +202,7 @@ export default function Home() {
       if (typeof window !== 'undefined' && 'Notification' in window) {
         if (Notification.permission === 'granted') {
           try {
-            const n = new Notification(`${partnerName} ✨`, {
+            const n = new Notification(`${senderName} ✨`, {
               body,
               icon: '/favicon.svg',
               tag: 'stealth-couple-chat',
@@ -224,9 +223,9 @@ export default function Home() {
     [currentRole, notificationsEnabled, mode, playNotificationChime]
   );
 
-  // Automatically request desktop notification permission on first click for Partner 1 ONLY
+  // Automatically request desktop notification permission on first click on this PC
   useEffect(() => {
-    if (typeof window === 'undefined' || currentRole !== 'partner1') return;
+    if (typeof window === 'undefined') return;
     const handleFirstClick = () => {
       if ('Notification' in window && Notification.permission === 'default') {
         Notification.requestPermission().catch(() => {});
@@ -234,11 +233,10 @@ export default function Home() {
     };
     window.addEventListener('click', handleFirstClick, { once: true });
     return () => window.removeEventListener('click', handleFirstClick);
-  }, [currentRole]);
+  }, []);
 
-  // Toggle / Test PC Notifications button handler (for Partner 1)
+  // Toggle / Test PC Notifications button handler
   const handleToggleNotifications = useCallback(async () => {
-    if (currentRole !== 'partner1') return;
 
     if (typeof window !== 'undefined' && 'Notification' in window) {
       if (Notification.permission === 'default') {
@@ -296,25 +294,29 @@ export default function Home() {
     }
   }, [config.roomId]);
 
-  // Process incoming messages list & detect new messages from Partner 2
+  // Process incoming messages list & detect new messages from the other partner
   const processIncomingMessages = useCallback(
     (incomingList: ChatMessage[]) => {
       if (!initialLoadDoneRef.current) {
         incomingList.forEach((m) => knownMessageIdsRef.current.add(m.id));
         initialLoadDoneRef.current = true;
       } else {
-        const newFromHer = incomingList.filter(
-          (m) => !knownMessageIdsRef.current.has(m.id) && m.sender === 'partner2'
+        const newFromPartner = incomingList.filter(
+          (m) => !knownMessageIdsRef.current.has(m.id) && m.sender !== currentRole
         );
         incomingList.forEach((m) => knownMessageIdsRef.current.add(m.id));
-        if (newFromHer.length > 0 && currentRole === 'partner1') {
-          const latest = newFromHer[newFromHer.length - 1];
-          notifyPartner1OnNewMessage(latest, config.partner2.name || 'My Love');
+        if (newFromPartner.length > 0) {
+          const latest = newFromPartner[newFromPartner.length - 1];
+          const senderName =
+            latest.sender === 'partner1'
+              ? config.partner1.name || 'Partner 1'
+              : config.partner2.name || 'Partner 2';
+          notifyOnNewMessage(latest, senderName);
         }
       }
       setMessages(incomingList);
     },
-    [currentRole, config.partner2.name, notifyPartner1OnNewMessage]
+    [currentRole, config.partner1.name, config.partner2.name, notifyOnNewMessage]
   );
 
   // Fetch messages & reconcile with client localStorage backup
@@ -696,6 +698,7 @@ export default function Home() {
         onPanic={() => setMode('stealth')}
         onOpenPairing={() => setIsPairingOpen(true)}
         onOpenGallery={() => setIsGalleryOpen(true)}
+        onSwitchRole={updateClientRole}
       />
 
       {/* Message Stream */}

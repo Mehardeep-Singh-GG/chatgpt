@@ -14,6 +14,7 @@ export interface SnapchatHeaderProps {
   streakDays?: number;
   notificationsEnabled?: boolean;
   onToggleNotifications?: () => void;
+  onSwitchRole?: (role: PartnerRole) => void;
   onPanic: () => void;
   onOpenPairing: () => void;
   onOpenGallery?: () => void;
@@ -26,6 +27,7 @@ export const SnapchatHeader: React.FC<SnapchatHeaderProps> = ({
   streakDays = 42,
   notificationsEnabled = true,
   onToggleNotifications,
+  onSwitchRole,
   onPanic,
   onOpenPairing,
   onOpenGallery,
@@ -172,10 +174,35 @@ export const SnapchatHeader: React.FC<SnapchatHeaderProps> = ({
           )}
         </div>
 
-        {/* Right Actions: Media Gallery, Notifications (Partner 1 only), Pairing / Settings & Stealth Panic Button */}
+        {/* Right Actions: Role Switcher, Media Gallery, Notifications, Pairing & Stealth Panic Button */}
         <div className="flex items-center gap-1 sm:gap-1.5 flex-shrink-0">
-          {/* PC Notification Toggle (ONLY shown to Partner 1 / Him, never on Her link) */}
-          {isPartner1 && onToggleNotifications && (
+          {/* Quick Switch to Partner 1 if currently stuck on Partner 2 */}
+          {!isPartner1 && onSwitchRole && (
+            <button
+              type="button"
+              onClick={() => onSwitchRole('partner1')}
+              className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-xs font-bold shadow-md transition-all active:scale-95 cursor-pointer animate-pulse"
+              title="Click to switch your identity to Partner 1 (Me)"
+            >
+              <span>👑</span>
+              <span>Switch to Partner 1</span>
+            </button>
+          )}
+
+          {/* Partner 1 identity badge */}
+          {isPartner1 && onSwitchRole && (
+            <button
+              type="button"
+              onClick={() => onSwitchRole('partner2')}
+              className="hidden sm:flex items-center gap-1 px-2.5 py-1 rounded-full bg-zinc-100 dark:bg-zinc-800/80 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-[11px] font-semibold text-zinc-600 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700 transition-colors"
+              title="You are Partner 1 (Me). Click to test as Partner 2"
+            >
+              <span>👑 You: Me</span>
+            </button>
+          )}
+
+          {/* PC Notification Toggle (Click to test or mute) */}
+          {onToggleNotifications && (
             <button
               type="button"
               onClick={onToggleNotifications}
@@ -186,7 +213,7 @@ export const SnapchatHeader: React.FC<SnapchatHeaderProps> = ({
               }`}
               title={
                 notificationsEnabled
-                  ? 'PC Notifications ON (Only for you) - Click to test or mute'
+                  ? 'PC Notifications ON - Click to test chime & banner'
                   : 'PC Notifications Muted - Click to enable'
               }
               aria-label="Toggle PC Notifications"
