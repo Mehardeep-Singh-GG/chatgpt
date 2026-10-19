@@ -123,6 +123,151 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastEscPressRef = useRef<number>(0);
 
+  // PC Notifications (Strictly for Partner 1 ONLY - never runs on Partner 2 / Her device)
+  const [notificationsEnabled, setNotificationsEnabled] = useState<boolean>(true);
+  const [unreadToast, setUnreadToast] = useState<{ title: string; body: string } | null>(null);
+  const knownMessageIdsRef = useRef<Set<string>>(new Set());
+  const initialLoadDoneRef = useRef<boolean>(false);
+
+  // Synthesize a clean two-tone notification chime via Web Audio API
+  const playNotificationChime = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const now = ctx.currentTime;
+
+      // Note 1 (D5 - 587.33Hz)
+      const osc1 = ctx.createOscillator();
+      const gain1 = ctx.createGain();
+      osc1.type = 'sine';
+      osc1.frequency.setValueAtTime(587.33, now);
+      gain1.gain.setValueAtTime(0.15, now);
+      gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+      osc1.connect(gain1);
+      gain1.connect(ctx.destination);
+      osc1.start(now);
+      osc1.stop(now + 0.18);
+
+      // Note 2 (A5 - 880Hz)
+      const osc2 = ctx.createOscillator();
+      const gain2 = ctx.createGain();
+      osc2.type = 'sine';
+      osc2.frequency.setValueAtTime(880, now + 0.12);
+      gain2.gain.setValueAtTime(0.18, now + 0.12);
+      gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+      osc2.connect(gain2);
+      gain2.connect(ctx.destination);
+      osc2.start(now + 0.12);
+      osc2.stop(now + 0.42);
+    } catch {
+      // AudioContext blocked before user interaction
+    }
+  }, []);
+
+  // Trigger PC Notification strictly for Partner 1
+  const notifyPartner1OnNewMessage = useCallback(
+    (msg: ChatMessage, partnerName: string) => {
+      // Strictly ONLY notify Partner 1 (you), NEVER Partner 2 (her)
+      if (currentRole !== 'partner1' || !notificationsEnabled) return;
+
+      const body =
+        msg.type === 'voice'
+          ? '🎙️ Sent you a voice memo'
+          : msg.type === 'video'
+            ? '📹 Sent you a video snap'
+            : msg.type === 'photo'
+              ? '📸 Sent you a photo snap'
+              : msg.text || 'Sent you a message';
+
+      // 1. Play sound chime
+      playNotificationChime();
+
+      // 2. Update tab title if in stealth mode or background tab
+      if (typeof document !== 'undefined' && (mode === 'stealth' || document.hidden)) {
+        document.title = '(1) ChatGPT';
+      }
+
+      // 3. Show discreet toast if sitting on the ChatGPT disguise screen
+      if (mode === 'stealth') {
+        setUnreadToast({ title: partnerName, body });
+        setTimeout(() => {
+          setUnreadToast((prev) => (prev?.body === body ? null : prev));
+        }, 6000);
+      }
+
+      // 4. Fire Desktop OS Notification (macOS / Windows banner)
+      if (typeof window !== 'undefined' && 'Notification' in window) {
+        if (Notification.permission === 'granted') {
+          try {
+            const n = new Notification(`${partnerName} ✨`, {
+              body,
+              icon: '/favicon.svg',
+              tag: 'stealth-couple-chat',
+            });
+            n.onclick = () => {
+              window.focus();
+              setMode('private');
+              setUnreadToast(null);
+              document.title = 'ChatGPT';
+              n.close();
+            };
+          } catch {
+            // Notification fallback
+          }
+        }
+      }
+    },
+    [currentRole, notificationsEnabled, mode, playNotificationChime]
+  );
+
+  // Automatically request desktop notification permission on first click for Partner 1 ONLY
+  useEffect(() => {
+    if (typeof window === 'undefined' || currentRole !== 'partner1') return;
+    const handleFirstClick = () => {
+      if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+      }
+    };
+    window.addEventListener('click', handleFirstClick, { once: true });
+    return () => window.removeEventListener('click', handleFirstClick);
+  }, [currentRole]);
+
+  // Toggle / Test PC Notifications button handler (for Partner 1)
+  const handleToggleNotifications = useCallback(async () => {
+    if (currentRole !== 'partner1') return;
+
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      if (Notification.permission === 'default') {
+        try {
+          await Notification.requestPermission();
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    const nextState = !notificationsEnabled;
+    setNotificationsEnabled(nextState);
+
+    if (nextState) {
+      playNotificationChime();
+      if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+        try {
+          new Notification('PC Notifications Enabled 🔔', {
+            body: `You'll be notified on this PC whenever ${config.partner2.name} texts you!`,
+            icon: '/favicon.svg',
+          });
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }, [currentRole, notificationsEnabled, playNotificationChime, config.partner2.name]);
+
   // Store secret token if passed in URL
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -151,6 +296,27 @@ export default function Home() {
     }
   }, [config.roomId]);
 
+  // Process incoming messages list & detect new messages from Partner 2
+  const processIncomingMessages = useCallback(
+    (incomingList: ChatMessage[]) => {
+      if (!initialLoadDoneRef.current) {
+        incomingList.forEach((m) => knownMessageIdsRef.current.add(m.id));
+        initialLoadDoneRef.current = true;
+      } else {
+        const newFromHer = incomingList.filter(
+          (m) => !knownMessageIdsRef.current.has(m.id) && m.sender === 'partner2'
+        );
+        incomingList.forEach((m) => knownMessageIdsRef.current.add(m.id));
+        if (newFromHer.length > 0 && currentRole === 'partner1') {
+          const latest = newFromHer[newFromHer.length - 1];
+          notifyPartner1OnNewMessage(latest, config.partner2.name || 'My Love');
+        }
+      }
+      setMessages(incomingList);
+    },
+    [currentRole, config.partner2.name, notifyPartner1OnNewMessage]
+  );
+
   // Fetch messages & reconcile with client localStorage backup
   const fetchMessages = useCallback(async () => {
     const storageKey = `stealth_chat_msgs_${config.roomId}`;
@@ -178,7 +344,7 @@ export default function Home() {
           });
           const syncData = await syncRes.json();
           if (syncData.success && Array.isArray(syncData.messages)) {
-            setMessages(syncData.messages);
+            processIncomingMessages(syncData.messages);
             try {
               localStorage.setItem(storageKey, JSON.stringify(syncData.messages.slice(-50)));
             } catch {
@@ -188,7 +354,7 @@ export default function Home() {
           }
         }
 
-        setMessages(serverMessages);
+        processIncomingMessages(serverMessages);
         try {
           localStorage.setItem(storageKey, JSON.stringify(serverMessages.slice(-50)));
         } catch {
@@ -198,7 +364,7 @@ export default function Home() {
     } catch {
       // Ignore network errors in polling
     }
-  }, [config.roomId]);
+  }, [config.roomId, processIncomingMessages]);
 
   // Heartbeat / presence ping
   const pingPresence = useCallback(async () => {
@@ -221,7 +387,7 @@ export default function Home() {
     }
   }, [config.roomId, currentRole, isTyping]);
 
-  // Poll messages and presence when in private mode
+  // Poll messages and presence (Partner 1 polls messages even in stealth mode for PC notifications!)
   useEffect(() => {
     let isSubscribed = true;
 
@@ -229,14 +395,19 @@ export default function Home() {
       if (!isSubscribed) return;
       await fetchConfig();
       await fetchMessages();
-      await pingPresence();
+      if (mode === 'private') {
+        await pingPresence();
+      }
     };
 
     void initData();
 
     const interval = setInterval(() => {
-      if (mode === 'private') {
+      // Partner 1 always polls messages in background so he gets PC notifications even in stealth mode
+      if (mode === 'private' || currentRole === 'partner1') {
         void fetchMessages();
+      }
+      if (mode === 'private') {
         void pingPresence();
       }
     }, 1500);
@@ -245,7 +416,7 @@ export default function Home() {
       isSubscribed = false;
       clearInterval(interval);
     };
-  }, [fetchConfig, fetchMessages, pingPresence, mode]);
+  }, [fetchConfig, fetchMessages, pingPresence, mode, currentRole]);
 
   // Instant Panic Switch Listener (Double Escape hotkey or window blur)
   useEffect(() => {
@@ -303,6 +474,8 @@ export default function Home() {
       opened: false,
       reactions: {},
     };
+
+    knownMessageIdsRef.current.add(fullMessage.id);
 
     // Optimistic UI update + localStorage backup
     setMessages((prev) => {
@@ -462,14 +635,38 @@ export default function Home() {
   // ----------------------------------------------------
   if (mode === 'stealth') {
     return (
-      <ChatGPTLayout
-        onEnterPrivateMode={() => setMode('private')}
-        passcodeEnabled={config.disguisePasscodeEnabled}
-        correctPasscode={config.disguisePasscode || '1234'}
-        onPanic={() => setMode('stealth')}
-        userName={myProfile.name || 'User'}
-        initialTheme="dark"
-      />
+      <div className="relative h-screen w-screen overflow-hidden">
+        {/* Discreet PC Notification Toast ONLY for Partner 1 when sitting on ChatGPT screen */}
+        {currentRole === 'partner1' && unreadToast && (
+          <div
+            onClick={() => {
+              setUnreadToast(null);
+              if (typeof document !== 'undefined') document.title = 'ChatGPT';
+              setMode('private');
+            }}
+            className="fixed top-4 right-4 z-50 flex items-center gap-3 rounded-2xl bg-zinc-900/95 border border-emerald-500/40 px-4 py-3 text-white shadow-2xl cursor-pointer hover:bg-zinc-800 transition-all animate-in fade-in slide-in-from-top-2 max-w-xs"
+          >
+            <span className="flex h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-400 animate-ping" />
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-bold text-emerald-400 truncate">{unreadToast.title}</p>
+              <p className="text-xs text-zinc-200 truncate">{unreadToast.body}</p>
+            </div>
+          </div>
+        )}
+
+        <ChatGPTLayout
+          onEnterPrivateMode={() => {
+            setUnreadToast(null);
+            if (typeof document !== 'undefined') document.title = 'ChatGPT';
+            setMode('private');
+          }}
+          passcodeEnabled={config.disguisePasscodeEnabled}
+          correctPasscode={config.disguisePasscode || '1234'}
+          onPanic={() => setMode('stealth')}
+          userName={myProfile.name || 'User'}
+          initialTheme="dark"
+        />
+      </div>
     );
   }
 
@@ -494,6 +691,8 @@ export default function Home() {
         myProfile={myProfile}
         presence={presence}
         streakDays={partnerProfile.streakDays || 42}
+        notificationsEnabled={notificationsEnabled}
+        onToggleNotifications={handleToggleNotifications}
         onPanic={() => setMode('stealth')}
         onOpenPairing={() => setIsPairingOpen(true)}
         onOpenGallery={() => setIsGalleryOpen(true)}

@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import confetti from 'canvas-confetti';
-import { Shield, Settings, Image as ImageIcon, Sparkles, Heart } from 'lucide-react';
+import { Shield, Settings, Image as ImageIcon, Sparkles, Heart, Bell, BellOff } from 'lucide-react';
 import { UserProfile, PartnerRole, RoomPresence } from '@/types';
 import { formatLastSeen } from '@/lib/chatUtils';
 
@@ -12,6 +12,8 @@ export interface SnapchatHeaderProps {
   myProfile?: UserProfile;
   presence?: RoomPresence;
   streakDays?: number;
+  notificationsEnabled?: boolean;
+  onToggleNotifications?: () => void;
   onPanic: () => void;
   onOpenPairing: () => void;
   onOpenGallery?: () => void;
@@ -22,6 +24,8 @@ export const SnapchatHeader: React.FC<SnapchatHeaderProps> = ({
   partnerProfile,
   presence,
   streakDays = 42,
+  notificationsEnabled = true,
+  onToggleNotifications,
   onPanic,
   onOpenPairing,
   onOpenGallery,
@@ -168,8 +172,33 @@ export const SnapchatHeader: React.FC<SnapchatHeaderProps> = ({
           )}
         </div>
 
-        {/* Right Actions: Media Gallery, Pairing / Settings & Stealth Panic Button */}
+        {/* Right Actions: Media Gallery, Notifications (Partner 1 only), Pairing / Settings & Stealth Panic Button */}
         <div className="flex items-center gap-1 sm:gap-1.5 flex-shrink-0">
+          {/* PC Notification Toggle (ONLY shown to Partner 1 / Him, never on Her link) */}
+          {isPartner1 && onToggleNotifications && (
+            <button
+              type="button"
+              onClick={onToggleNotifications}
+              className={`p-2 rounded-full transition-colors cursor-pointer ${
+                notificationsEnabled
+                  ? 'text-amber-400 bg-amber-500/10 hover:bg-amber-500/20'
+                  : 'text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+              }`}
+              title={
+                notificationsEnabled
+                  ? 'PC Notifications ON (Only for you) - Click to test or mute'
+                  : 'PC Notifications Muted - Click to enable'
+              }
+              aria-label="Toggle PC Notifications"
+            >
+              {notificationsEnabled ? (
+                <Bell className="w-5 h-5 fill-amber-400/20" />
+              ) : (
+                <BellOff className="w-5 h-5" />
+              )}
+            </button>
+          )}
+
           {/* Media Gallery Button */}
           {onOpenGallery && (
             <button
